@@ -1,0 +1,163 @@
+/**
+ * @file   syscalls.c
+ *
+ * @brief  Implementation of syscalls needed for newlib and 349 custom syscalls
+ *
+ * @date   10/17/17
+ * @author James Zhang <jameszha@andrew.cmu.edu>
+ */
+
+#include <arm.h>
+#include <kstdint.h>
+#include <printk.h>
+#include <uart.h>
+#include <syscalls.h>
+
+
+
+/** @brief Global variable to keep track of where our heap ends */
+char *heap_end = 0;
+
+
+void syscall_exit(int status) {
+  disable_interrupts();
+  printk("\n Status = %d\n", status);
+  while(1){}
+  return;
+}
+
+
+int syscall_write(int file, char *ptr, int len) {
+  if (file != STDOUT_FILENO) return -1;
+  int i;
+  for (i = 0; i < len; i++){
+    uart_put_byte(ptr[i]);
+  }
+  return len;
+}
+
+
+/**
+ * Reads until all len bytes are read or newline/return is found.
+ * Detects backspace and EOL characters and handles them appropriately.
+ *
+ * The idea is to mimic normal terminal reading input, that is,
+ * if the user hits backspace it should erase the previously read character.
+ */
+int syscall_read(int file, char *ptr, int len) {
+  if (file != STDIN_FILENO) return -1;
+  int num_read = 0;
+  uint8_t new_char;
+  while(((new_char = uart_get_byte()) != 4) && (num_read < len)){
+    //check for backspace char or delete char
+    if ((new_char == 8) || (new_char == 127)){
+      if (num_read > 0) {
+        num_read--;
+        uart_put_byte('\b');uart_put_byte(' ');uart_put_byte('\b');
+      }
+    }
+    //check for Windows or Unix return
+    else if ((new_char == 10) || ((new_char == 13) && uart_get_byte() == 10)){
+      ptr[num_read++] = '\n';
+      uart_put_byte('\n');
+      break;
+    }
+    //normal char
+    else{
+      ptr[num_read++] = new_char;
+      uart_put_byte(new_char);
+    }
+    
+  }
+  ptr[num_read] = '\0';
+  return num_read;
+}
+
+int thread_init(thread_fn idle_fn, uint32_t *idle_stack_start){
+  runnable_BV = 0;
+  waiting_BV = 0;
+  running_index = NO_RUNNING_TASKS;
+  printk("THREAD INIT = %d\n", running_index);
+  return thread_create(idle_fn, idle_stack_start, 31, -1, -1);
+}
+
+int thread_create(thread_fn fn, uint32_t *stack_start, unsigned int prio, unsigned int C, unsigned int T){
+  if (fn == NULL || stack_start == NULL) return -1;
+  if (runnable_BV & (1 << prio)) return -1; //if there is already a task of the given priority
+
+  runnable_BV |= (1 << prio);
+
+  //initialize status
+  TCBs[prio].status = RUNNABLE;
+  TCBs[prio].priority = prio;
+  TCBs[prio].execution_time = C;
+  TCBs[prio].period = T;
+  TCBs[prio].next_wakeup = 0;
+  TCBs[prio].next_sleep;
+
+  //initialize context
+  TCBs[prio].fn = (uint32_t) fn;
+  TCBs[prio].irq_lr = (uint32_t) fn;
+  TCBs[prio].irq_spsr = 0x10;
+  TCBs[prio].user_sp = (uint32_t) (stack_start);
+  return 0;
+}
+
+
+int scheduler_start(void){
+  system_time = 0;
+  enable_interrupts();
+  timer_start(1000);
+  while(1);
+  return 0;
+}
+
+void wait_until_next_period(void) {
+  TCBs[running_index].status = WAITING;
+  while(TCBs[running_index].status == WAITING);
+}
+
+unsigned int get_time(void){
+  return system_time;
+}
+
+/*****************************************************************************/
+/* TA system call implementations:                                           */
+/*****************************************************************************/
+
+void *syscall_sbrk(int incr) {
+  extern char __heap_low; // Defined by the linker
+  extern char __heap_top; // Defined by the linker
+  char *prev_heap_end;
+
+  if (heap_end == 0) {
+    // Initialize heap_end if this is the first time sbrk was called
+    heap_end = &__heap_low;
+  }
+
+  prev_heap_end = heap_end;
+  if (heap_end + incr > &__heap_top) {
+    // Heap and stack collision, return error
+    return (void *) -1;
+  }
+
+  // update heap_end and return old heap_end
+  heap_end += incr;
+  return (void *) prev_heap_end;
+}
+
+int syscall_close(int file) {
+  return -1;
+}
+
+int syscall_fstat(int file, void *st) {
+  return 0;
+}
+
+int syscall_isatty(int file) {
+  return 1;
+}
+
+int syscall_lseek(int file, int ptr, int dir) {
+  return 0;
+}
